@@ -1,24 +1,17 @@
 # database.py
 
-import aiosqlite
+import os
+import asyncpg
 
-DB_NAME = "gear.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("Chýba DATABASE_URL")
 
 
 DEFAULT_WEAPON_PRICES = {
-    "AUTO": {
-        "white": 3200,
-        "yellow": 17500,
-        "orange": 25000,
-        "green": 46000,
-    },
-    "SEMI": {
-        "white": 2200,
-        "yellow": 8800,
-        "orange": 15000,
-        "green": 23000,
-        "blue": 42000,
-    },
+    "AUTO": {"white": 3200, "yellow": 17500, "orange": 25000, "green": 46000},
+    "SEMI": {"white": 2200, "yellow": 8800, "orange": 15000, "green": 23000, "blue": 42000},
     "MANUAL": {
         "white": 1300,
         "yellow": 4400,
@@ -38,18 +31,23 @@ DEFAULT_SPECIAL_PRICES = {
 }
 
 
+async def connect():
+    return await asyncpg.connect(DATABASE_URL)
+
+
 async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
+    conn = await connect()
+    try:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )
         """)
 
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS equipment (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 discord_user_id TEXT NOT NULL,
                 discord_name TEXT NOT NULL,
                 item_name TEXT NOT NULL,
@@ -61,9 +59,9 @@ async def init_db():
             )
         """)
 
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS price_config (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 category TEXT NOT NULL,
                 weapon_type TEXT NOT NULL DEFAULT '',
                 color TEXT NOT NULL DEFAULT '',
@@ -72,57 +70,59 @@ async def init_db():
                 UNIQUE(category, weapon_type, color, item_name)
             )
         """)
-
-        await db.commit()
+    finally:
+        await conn.close()
 
 
 async def seed_default_prices():
-    async with aiosqlite.connect(DB_NAME) as db:
-        count_cursor = await db.execute("SELECT COUNT(*) FROM price_config")
-        count_row = await count_cursor.fetchone()
-        current_count = count_row[0] if count_row else 0
+    conn = await connect()
+    try:
+        count = await conn.fetchval("SELECT COUNT(*) FROM price_config")
 
-        if current_count > 0:
+        if count and count > 0:
             return
 
         for weapon_type, colors in DEFAULT_WEAPON_PRICES.items():
             for color, price in colors.items():
-                await db.execute("""
-                    INSERT INTO price_config (
-                        category, weapon_type, color, item_name, price
-                    )
-                    VALUES (?, ?, ?, ?, ?)
-                """, ("weapon", weapon_type, color, "", price))
+                await conn.execute("""
+                    INSERT INTO price_config (category, weapon_type, color, item_name, price)
+                    VALUES ('weapon', $1, $2, '', $3)
+                    ON CONFLICT(category, weapon_type, color, item_name)
+                    DO NOTHING
+                """, weapon_type, color, price)
 
         for item_name, price in DEFAULT_SPECIAL_PRICES.items():
-            await db.execute("""
-                INSERT INTO price_config (
-                    category, weapon_type, color, item_name, price
-                )
-                VALUES (?, ?, ?, ?, ?)
-            """, ("special", "", "", item_name, price))
-
-        await db.commit()
+            await conn.execute("""
+                INSERT INTO price_config (category, weapon_type, color, item_name, price)
+                VALUES ('special', '', '', $1, $2)
+                ON CONFLICT(category, weapon_type, color, item_name)
+                DO NOTHING
+            """, item_name, price)
+    finally:
+        await conn.close()
 
 
 async def set_setting(key: str, value: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
+    conn = await connect()
+    try:
+        await conn.execute("""
             INSERT INTO settings (key, value)
-            VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        """, (key, value))
-        await db.commit()
+            VALUES ($1, $2)
+            ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value
+        """, key, value)
+    finally:
+        await conn.close()
 
 
 async def get_setting(key: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute(
-            "SELECT value FROM settings WHERE key = ?",
-            (key,)
+    conn = await connect()
+    try:
+        return await conn.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            key,
         )
-        row = await cursor.fetchone()
-        return row[0] if row else None
+    finally:
+        await conn.close()
 
 
 async def add_equipment(
@@ -134,8 +134,9 @@ async def add_equipment(
     weapon_type: str | None = None,
     color: str | None = None,
 ):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
+    conn = await connect()
+    try:
+        await conn.execute("""
             INSERT INTO equipment (
                 discord_user_id,
                 discord_name,
@@ -146,121 +147,107 @@ async def add_equipment(
                 price,
                 purchased
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-        """, (
-            discord_user_id,
-            discord_name,
-            item_name,
-            category,
-            weapon_type,
-            color,
-            price,
-        ))
-        await db.commit()
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+        """, discord_user_id, discord_name, item_name, category, weapon_type, color, price)
+    finally:
+        await conn.close()
 
 
 async def get_all_equipment():
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
+    conn = await connect()
+    try:
+        return await conn.fetch("""
             SELECT id, discord_user_id, discord_name, item_name, category,
                    weapon_type, color, price, purchased
             FROM equipment
             ORDER BY discord_name ASC, id ASC
         """)
-        return await cursor.fetchall()
+    finally:
+        await conn.close()
 
 
 async def get_user_equipment(discord_user_id: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
+    conn = await connect()
+    try:
+        return await conn.fetch("""
             SELECT id, item_name, category, weapon_type, color, price, purchased
             FROM equipment
-            WHERE discord_user_id = ?
+            WHERE discord_user_id = $1
             ORDER BY id ASC
-        """, (discord_user_id,))
-        return await cursor.fetchall()
+        """, discord_user_id)
+    finally:
+        await conn.close()
 
 
 async def toggle_purchased(item_id: int, discord_user_id: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
+    conn = await connect()
+    try:
+        purchased = await conn.fetchval("""
             SELECT purchased
             FROM equipment
-            WHERE id = ? AND discord_user_id = ?
-        """, (item_id, discord_user_id))
+            WHERE id = $1 AND discord_user_id = $2
+        """, item_id, discord_user_id)
 
-        row = await cursor.fetchone()
-        if not row:
+        if purchased is None:
             return False
 
-        new_value = 0 if row[0] else 1
+        new_value = 0 if purchased else 1
 
-        await db.execute("""
+        await conn.execute("""
             UPDATE equipment
-            SET purchased = ?
-            WHERE id = ? AND discord_user_id = ?
-        """, (new_value, item_id, discord_user_id))
+            SET purchased = $1
+            WHERE id = $2 AND discord_user_id = $3
+        """, new_value, item_id, discord_user_id)
 
-        await db.commit()
         return True
+    finally:
+        await conn.close()
 
 
 async def delete_equipment(item_id: int, discord_user_id: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
-            SELECT id
-            FROM equipment
-            WHERE id = ? AND discord_user_id = ?
-        """, (item_id, discord_user_id))
-
-        row = await cursor.fetchone()
-        if not row:
-            return False
-
-        await db.execute("""
+    conn = await connect()
+    try:
+        result = await conn.execute("""
             DELETE FROM equipment
-            WHERE id = ? AND discord_user_id = ?
-        """, (item_id, discord_user_id))
+            WHERE id = $1 AND discord_user_id = $2
+        """, item_id, discord_user_id)
 
-        await db.commit()
-        return True
+        return result.endswith("1")
+    finally:
+        await conn.close()
 
 
 async def get_all_equipment_for_admin():
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
+    conn = await connect()
+    try:
+        return await conn.fetch("""
             SELECT id, discord_name, item_name, category, weapon_type, color, price, purchased
             FROM equipment
             ORDER BY discord_name ASC, id ASC
         """)
-        return await cursor.fetchall()
+    finally:
+        await conn.close()
 
 
 async def admin_delete_equipment(item_id: int):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
-            SELECT id
-            FROM equipment
-            WHERE id = ?
-        """, (item_id,))
-
-        row = await cursor.fetchone()
-        if not row:
-            return False
-
-        await db.execute("""
+    conn = await connect()
+    try:
+        result = await conn.execute("""
             DELETE FROM equipment
-            WHERE id = ?
-        """, (item_id,))
+            WHERE id = $1
+        """, item_id)
 
-        await db.commit()
-        return True
+        return result.endswith("1")
+    finally:
+        await conn.close()
 
 
 async def delete_all_equipment():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("DELETE FROM equipment")
-        await db.commit()
+    conn = await connect()
+    try:
+        await conn.execute("DELETE FROM equipment")
+    finally:
+        await conn.close()
 
 
 async def is_adding_locked():
@@ -273,35 +260,39 @@ async def set_adding_locked(locked: bool):
 
 
 async def get_weapon_price(weapon_type: str, color: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
+    conn = await connect()
+    try:
+        return await conn.fetchval("""
             SELECT price
             FROM price_config
             WHERE category = 'weapon'
-            AND weapon_type = ?
-            AND color = ?
+            AND weapon_type = $1
+            AND color = $2
             AND item_name = ''
-        """, (weapon_type, color))
-        row = await cursor.fetchone()
-        return row[0] if row else None
+        """, weapon_type, color)
+    finally:
+        await conn.close()
 
 
 async def get_available_weapon_prices(weapon_type: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
+    conn = await connect()
+    try:
+        return await conn.fetch("""
             SELECT color, price
             FROM price_config
             WHERE category = 'weapon'
-            AND weapon_type = ?
+            AND weapon_type = $1
             AND item_name = ''
             ORDER BY id ASC
-        """, (weapon_type,))
-        return await cursor.fetchall()
+        """, weapon_type)
+    finally:
+        await conn.close()
 
 
 async def get_special_prices():
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
+    conn = await connect()
+    try:
+        return await conn.fetch("""
             SELECT item_name, price
             FROM price_config
             WHERE category = 'special'
@@ -309,57 +300,61 @@ async def get_special_prices():
             AND color = ''
             ORDER BY id ASC
         """)
-        return await cursor.fetchall()
+    finally:
+        await conn.close()
 
 
 async def get_special_price(item_name: str):
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
+    conn = await connect()
+    try:
+        return await conn.fetchval("""
             SELECT price
             FROM price_config
             WHERE category = 'special'
             AND weapon_type = ''
             AND color = ''
-            AND item_name = ?
-        """, (item_name,))
-        row = await cursor.fetchone()
-        return row[0] if row else None
+            AND item_name = $1
+        """, item_name)
+    finally:
+        await conn.close()
 
 
 async def update_weapon_price(weapon_type: str, color: str, new_price: int):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
+    conn = await connect()
+    try:
+        await conn.execute("""
             INSERT INTO price_config (category, weapon_type, color, item_name, price)
-            VALUES ('weapon', ?, ?, '', ?)
+            VALUES ('weapon', $1, $2, '', $3)
             ON CONFLICT(category, weapon_type, color, item_name)
-            DO UPDATE SET price = excluded.price
-        """, (weapon_type, color, new_price))
+            DO UPDATE SET price = EXCLUDED.price
+        """, weapon_type, color, new_price)
 
-        await db.execute("""
+        await conn.execute("""
             UPDATE equipment
-            SET price = ?
+            SET price = $1
             WHERE category = 'weapon'
-            AND weapon_type = ?
-            AND color = ?
-        """, (new_price, weapon_type, color))
-
-        await db.commit()
+            AND weapon_type = $2
+            AND color = $3
+        """, new_price, weapon_type, color)
+    finally:
+        await conn.close()
 
 
 async def update_special_price(item_name: str, new_price: int):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""
+    conn = await connect()
+    try:
+        await conn.execute("""
             INSERT INTO price_config (category, weapon_type, color, item_name, price)
-            VALUES ('special', '', '', ?, ?)
+            VALUES ('special', '', '', $1, $2)
             ON CONFLICT(category, weapon_type, color, item_name)
-            DO UPDATE SET price = excluded.price
-        """, (item_name, new_price))
+            DO UPDATE SET price = EXCLUDED.price
+        """, item_name, new_price)
 
-        await db.execute("""
+        await conn.execute("""
             UPDATE equipment
-            SET price = ?
+            SET price = $1
             WHERE category = 'special'
-            AND item_name = ?
-        """, (new_price, item_name))
-
-        await db.commit()
+            AND item_name = $2
+        """, new_price, item_name)
+    finally:
+        await conn.close()
