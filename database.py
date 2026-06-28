@@ -34,7 +34,6 @@ DEFAULT_SPECIAL_PRICES = {
 
 
 async def connect():
-    print("DB URL =", os.getenv("DATABASE_URL"))
     return await asyncpg.connect(get_database_url())
 
 
