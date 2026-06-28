@@ -46,13 +46,13 @@ async def build_equipment_embed() -> discord.Embed:
             color_icon = COLOR_EMOJIS.get(color, "▫️")
             color_name = COLOR_NAMES.get(color, color)
             line = (
-                f"{status} `{item_id}` {color_icon} "
+                f"{status} {color_icon} "
                 f"**{weapon_type}** / {color_name} — "
                 f"{item_name} — **{format_price(price)}**"
             )
         else:
             line = (
-                f"{status} `{item_id}` 🎒 "
+                f"{status} 🎒 "
                 f"**VÝBAVA** — {item_name} — **{format_price(price)}**"
             )
 
