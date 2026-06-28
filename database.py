@@ -3,11 +3,13 @@
 import os
 import asyncpg
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+def get_database_url():
+    db_url = os.getenv("DATABASE_URL")
 
-if not DATABASE_URL:
-    raise RuntimeError("Chýba DATABASE_URL")
+    if not db_url:
+        raise RuntimeError("Chýba DATABASE_URL")
 
+    return db_url
 
 DEFAULT_WEAPON_PRICES = {
     "AUTO": {"white": 3200, "yellow": 17500, "orange": 25000, "green": 46000},
@@ -32,7 +34,8 @@ DEFAULT_SPECIAL_PRICES = {
 
 
 async def connect():
-    return await asyncpg.connect(DATABASE_URL)
+    print("DB URL =", os.getenv("DATABASE_URL"))
+    return await asyncpg.connect(get_database_url())
 
 
 async def init_db():
